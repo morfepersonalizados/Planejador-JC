@@ -169,6 +169,10 @@ tbody tr:hover{background:var(--cinza-ultra)}
   .kpi-grid{grid-template-columns:repeat(2,1fr)}
 }
 </style>
+<!-- Login com Google — o Client ID abaixo não é segredo (identifica o
+     app, não autoriza nada sozinho); quem autoriza de verdade é o Apps
+     Script, validando o token do lado do servidor contra AUTHORIZED_EMAILS. -->
+<script src="https://accounts.google.com/gsi/client" async defer onload="inicializarLoginGoogle()"></script>
 </head>
 <body class="sidebar-hidden">
 <script>if(localStorage.getItem('nd_tema_escuro')==='1')document.body.classList.add('tema-escuro');</script>
@@ -185,8 +189,7 @@ tbody tr:hover{background:var(--cinza-ultra)}
       <div class="login-divisor"></div>
     </div>
     <div id="login-error" class="login-error"></div>
-    <input type="password" class="login-input" id="login-senha" placeholder="🔑 Digite a senha" onkeydown="if(event.key==='Enter')entrar()">
-    <button class="login-btn" id="login-btn" onclick="entrar()">Entrar</button>
+    <div id="login-google-area" style="margin-top:10px;display:flex;justify-content:center"></div>
   </div>
 </div>
 
@@ -256,10 +259,13 @@ tbody tr:hover{background:var(--cinza-ultra)}
 <script>
 // ═══════════════════════════════════════════════════════════════
 // CONFIGURAÇÃO — troque isso quando implantar o Apps Script (ver o
-// arquivo codigo_apps_script_financeiro.js que acompanha esse sistema)
+// arquivo apps-script-backend.gs que acompanha esse sistema)
 // ═══════════════════════════════════════════════════════════════
 const SHEETS_API_URL = 'COLE_URL_DO_APPS_SCRIPT_AQUI';
-const SENHA_APP = 'nosso2026';
+const GOOGLE_CLIENT_ID = '866951819808-tqeoto2rqnr34p7250mmq6l7mn93afs2.apps.googleusercontent.com';
+let _googleIdToken = null; // preenchido só depois de um login com Google bem-sucedido
+let _googleBotaoRenderizado = false;
+let _sessaoExpirada = false; // true quando a sincronização falhou por token vencido e a renovação silenciosa também não deu certo
 
 let DB = {
   config:{pessoa1_nome:'Pessoa 1', pessoa2_nome:'Pessoa 2', renda_base_p1:0, renda_base_p2:0, modo_divisao:'proporcional', meta_economia_pct:20},
@@ -270,23 +276,59 @@ const TABELAS = ['config','entradas','despesas_fixas','despesas','potes','aporte
 // ═══════════════════════════════════════════════════════════════
 // AUTENTICAÇÃO / LOGIN
 // ═══════════════════════════════════════════════════════════════
-function credenciaisAuth(){ return { senha: SENHA_APP }; }
-function entrar(){
-  const senha=document.getElementById('login-senha').value;
-  if(senha!==SENHA_APP){
-    document.getElementById('login-error').textContent='Senha incorreta.';
-    return;
-  }
+function credenciaisAuth(){ return { token: _googleIdToken }; }
+
+// Chamado pelo Google depois que a pessoa escolhe a conta e confirma —
+// "response.credential" é o token assinado pelo Google (ID token), que o
+// Apps Script confere de verdade do lado do servidor (contra AUTHORIZED_EMAILS
+// nas Script Properties) antes de liberar qualquer dado.
+function entrarComGoogle(response){
+  _googleIdToken=response.credential;
   document.getElementById('login-error').textContent='';
   document.getElementById('login-screen').style.display='none';
   document.getElementById('app').style.display='block';
   carregarLocal();
   finalizarLogin();
 }
+function inicializarLoginGoogle(tentativa){
+  tentativa=tentativa||0;
+  if(_googleBotaoRenderizado) return;
+  const area=document.getElementById('login-google-area');
+  const errEl=document.getElementById('login-error');
+  if(typeof google==='undefined' || !google.accounts || !area){
+    if(tentativa<20){ setTimeout(()=>inicializarLoginGoogle(tentativa+1),250); return; }
+    if(errEl) errEl.textContent='⚠️ Não deu pra carregar o login do Google — verifique sua internet e recarregue a página.';
+    return;
+  }
+  try{
+    google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: entrarComGoogle });
+    google.accounts.id.renderButton(area, { theme:'outline', size:'large', width:280, text:'signin_with' });
+    _googleBotaoRenderizado=true;
+  }catch(e){
+    if(errEl) errEl.textContent='⚠️ Erro ao iniciar login do Google: '+e.message;
+  }
+}
+// Renova o token do Google silenciosamente (dura só ~1h) sem precisar
+// recarregar a página nem pedir pra ninguém clicar em nada de novo.
+function renovarSessaoGoogle(){
+  return new Promise((resolve)=>{
+    if(typeof google==='undefined' || !google.accounts){ resolve(false); return; }
+    let resolvido=false;
+    const restaurarCallbackPadrao=()=>{ try{ google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: entrarComGoogle }); }catch(e){} };
+    const finalizar=(ok)=>{ if(resolvido) return; resolvido=true; restaurarCallbackPadrao(); resolve(ok); };
+    try{
+      google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, auto_select:true, callback:(response)=>{ _googleIdToken=response.credential; finalizar(true); } });
+      google.accounts.id.prompt((notification)=>{
+        if((notification.isNotDisplayed&&notification.isNotDisplayed()) || (notification.isSkippedMoment&&notification.isSkippedMoment())) finalizar(false);
+      });
+      setTimeout(()=>finalizar(false), 8000);
+    }catch(e){ finalizar(false); }
+  });
+}
 function sair(){
+  _googleIdToken=null;
   document.getElementById('app').style.display='none';
   document.getElementById('login-screen').style.display='flex';
-  document.getElementById('login-senha').value='';
 }
 function finalizarLogin(){
   inicializarSidebar();
@@ -411,11 +453,30 @@ async function sincronizarSheets(){
     await processarFila();
     const tabelasComPendenciaNaFila=new Set(_pendingQueue.map(op=>op.tabela));
     const CAMPOS_DATA=['data','venc','dia_vencimento_data'];
-    const _authParam=credenciaisAuth().senha?'senha='+encodeURIComponent(credenciaisAuth().senha):'';
+    const _authParam=credenciaisAuth().token?'token='+encodeURIComponent(credenciaisAuth().token):'';
     const url=SHEETS_API_URL+'?acao=ler_tudo&'+_authParam;
     const res=await fetch(url);
     const data=await res.json();
-    if(!data.ok) throw new Error(data.erro||'Falha ao ler dados');
+    if(!data.ok){
+      const erro=data.erro||'Falha ao ler dados';
+      // Distingue "token do Google vencido" de erro de rede/servidor de
+      // verdade — sem isso, os dois caíam no mesmo catch e mostravam
+      // "📴 Offline" pra sempre, mesmo com internet normal, até recarregar
+      // a página (que sem querer pedia um token novo por trás).
+      if(/token|autenticad|autorizad/i.test(erro)){
+        registrarLogSync('erro_auth', erro);
+        const renovou=await renovarSessaoGoogle();
+        if(renovou){
+          registrarLogSync('info','Sessão do Google renovada — tentando sincronizar de novo');
+          setTimeout(()=>sincronizarSheets(),300);
+          return;
+        }
+        _sessaoExpirada=true;
+        setSyncStatus('error','🔒 Sessão expirada — toque aqui');
+        return;
+      }
+      throw new Error(erro);
+    }
     const tabelasBloqueadasPorSeguranca=[];
     Object.keys(data.dados).forEach(tabela=>{
       if(_tabelasComSyncPendente.has(tabela)) return;
@@ -470,6 +531,7 @@ async function sincronizarSheets(){
     if(Array.isArray(DB.config) && DB.config.length>0) DB.config=DB.config[0];
     salvarLocal();
     _tabelasBloqueadasPorSeguranca=tabelasBloqueadasPorSeguranca;
+    _sessaoExpirada=false;
     if(tabelasBloqueadasPorSeguranca.length>0){
       setSyncStatus('error','⚠️ Verifique: '+tabelasBloqueadasPorSeguranca.join(', '));
     } else {
@@ -497,6 +559,17 @@ async function processarFila(){
 }
 function sincronizarAgora(){ sincronizarSheets(); }
 function verPendencias(){
+  if(_sessaoExpirada){
+    openModal('🔒 Sessão expirada',
+      `<p style="font-size:12.5px;color:var(--cinza-med)">Sua sessão do Google expirou — isso é normal depois de um tempo com a aba aberta sem uso. Toque no botão abaixo pra renovar: não precisa recarregar a página, e nada do que você preencheu se perde.</p>`,
+      async()=>{
+        closeModal();
+        const ok=await renovarSessaoGoogle();
+        if(ok){ _sessaoExpirada=false; toast('Sessão renovada! Sincronizando...'); sincronizarSheets(); }
+        else toast('Não deu pra renovar automaticamente — tenta recarregar a página','error');
+      }, '🔓 Renovar Sessão');
+    return;
+  }
   if(_tabelasBloqueadasPorSeguranca.length>0){
     const tabelas=_tabelasBloqueadasPorSeguranca;
     openModal('🛡️ Proteção Ativada',
@@ -636,7 +709,7 @@ function totalPorTipo(mesRef, tipo){ return despesasPorTipo(mesRef,tipo).reduce(
 function desduplicarDespesasFixas(){
   const grupos={};
   DB.despesas_fixas.forEach(df=>{
-    const chave=(df.descricao||'').trim().toLowerCase();
+    const chave=`${(df.descricao||'').trim().toLowerCase()}:${df.tipo||''}`;
     if(!grupos[chave]) grupos[chave]=[];
     grupos[chave].push(df);
   });
@@ -663,7 +736,7 @@ function desduplicarDespesasGeradas(){
   const grupos={};
   DB.despesas.forEach(x=>{
     if(!x.mes_ref) return;
-    const chave=`${(x.descricao||'').trim().toLowerCase()}:${x.mes_ref}`;
+    const chave=`${(x.descricao||'').trim().toLowerCase()}:${x.tipo||''}:${x.mes_ref}`;
     if(!grupos[chave]) grupos[chave]=[];
     grupos[chave].push(x);
   });
@@ -689,10 +762,10 @@ function gerarDespesasFixasDoMes(){
   const mesRef=`${hoje.getFullYear()}-${String(hoje.getMonth()+1).padStart(2,'0')}`;
   const nomesJaGerados=new Set();
   DB.despesas_fixas.forEach(df=>{
-    const chaveNome=(df.descricao||'').trim().toLowerCase();
+    const chaveNome=`${(df.descricao||'').trim().toLowerCase()}:${df.tipo||''}`;
     if(nomesJaGerados.has(chaveNome)) return;
     nomesJaGerados.add(chaveNome);
-    const jaExiste=DB.despesas.some(x=>(x.despesa_fixa_id===df.id && x.mes_ref===mesRef) || (x.mes_ref===mesRef && (x.descricao||'').trim().toLowerCase()===chaveNome));
+    const jaExiste=DB.despesas.some(x=>(x.despesa_fixa_id===df.id && x.mes_ref===mesRef) || (x.mes_ref===mesRef && `${(x.descricao||'').trim().toLowerCase()}:${x.tipo||''}`===chaveNome));
     if(jaExiste) return;
     const ultimoDiaMes=new Date(hoje.getFullYear(), hoje.getMonth()+1, 0).getDate();
     const dia=Math.min(+df.dia_vencimento||1, ultimoDiaMes);
@@ -1155,7 +1228,7 @@ SECTIONS.config=()=>{
   <div class="panel">
     <div class="panel-header"><span class="panel-title">🔄 Sincronização</span></div>
     <div style="padding:16px">
-      <p style="font-size:12px;color:var(--cinza-med);margin-bottom:10px">Pra sincronizar entre os aparelhos de vocês dois, é preciso ter uma planilha Google + Apps Script próprios desse sistema (separados da loja). Veja o arquivo <b>codigo_apps_script_financeiro.js</b> que acompanha esse sistema.</p>
+      <p style="font-size:12px;color:var(--cinza-med);margin-bottom:10px">Pra sincronizar entre os aparelhos de vocês dois, é preciso ter uma planilha Google + Apps Script próprios desse sistema (separados da loja). Veja o arquivo <b>apps-script-backend.gs</b> que acompanha esse sistema.</p>
       <div style="display:flex;gap:10px">
         <button class="btn btn-primary" onclick="sincronizarAgora()">🔄 Sincronizar Agora</button>
         <button class="btn btn-outline" onclick="verPendencias()">📋 Ver Pendências</button>
@@ -1172,6 +1245,7 @@ async function salvarConfigPessoas(){
   const obj={...DB.config, id:1};
   DB.config=obj;
   salvarLocal();
+  _ultimaEdicaoLocal['config:1']=Date.now();
   try{ await enviarParaSheets('upsert','config',obj); setSyncStatus('ok','✅ Sincronizado'); }
   catch(e){ _pendingQueue.push({acao:'upsert',tabela:'config',dados:obj,ultimoErro:e?.message||String(e),tentadoEm:new Date().toISOString()}); salvarLocal(); setSyncStatus('error','📴 Salvo local'); }
   toast('Configurações salvas!');
