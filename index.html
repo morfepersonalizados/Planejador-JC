@@ -1668,19 +1668,55 @@ async function cancelarParcela(parcelaId){
 // CALENDÁRIO
 // ═══════════════════════════════════════════════════════════════
 let _calMesAtual=new Date().getMonth(), _calAnoAtual=new Date().getFullYear();
+// Calendário unificado: agrega despesas em aberto, aportes planejados (não
+// confirmados) e parcelas pendentes de parcelamentos — as três fontes de
+// "compromisso financeiro com data" que o sistema tem hoje.
 function diasComContas(mes, ano){
   const porDia={};
+  function registrar(dia, valor){
+    if(!porDia[dia]) porDia[dia]={qtd:0,valor:0};
+    porDia[dia].qtd++; porDia[dia].valor+=(+valor||0);
+  }
   DB.despesas.forEach(x=>{
     if(!x.venc || x.status==='Pago') return;
     const d=new Date(normalizarData(x.venc)+'T00:00:00');
-    if(isNaN(d)) return;
-    if(d.getMonth()===mes && d.getFullYear()===ano){
-      const dia=d.getDate();
-      if(!porDia[dia]) porDia[dia]={qtd:0,valor:0};
-      porDia[dia].qtd++; porDia[dia].valor+=(+x.valor||0);
-    }
+    if(isNaN(d) || d.getMonth()!==mes || d.getFullYear()!==ano) return;
+    registrar(d.getDate(), x.valor);
+  });
+  DB.aportes.forEach(a=>{
+    if(a.status!=='planejado' || !a.data) return;
+    const d=new Date(a.data+'T00:00:00');
+    if(isNaN(d) || d.getMonth()!==mes || d.getFullYear()!==ano) return;
+    registrar(d.getDate(), a.valor);
+  });
+  DB.parcelas.forEach(pc=>{
+    if(pc.status!=='Pendente' || !pc.vencimento) return;
+    const d=new Date(pc.vencimento+'T00:00:00');
+    if(isNaN(d) || d.getMonth()!==mes || d.getFullYear()!==ano) return;
+    registrar(d.getDate(), pc.valor);
   });
   return porDia;
+}
+// Lista normalizada de tudo que tem data marcada num dia específico —
+// despesa, aporte planejado ou parcela pendente — pro modal de detalhe.
+function eventosFinanceirosDoDia(dataStr){
+  const eventos=[];
+  DB.despesas.forEach(x=>{
+    if(normalizarData(x.venc)===dataStr) eventos.push({tipo:'despesa', id:x.id, descricao:x.descricao, quem:x.tipo, valor:x.valor, pago:x.status==='Pago'});
+  });
+  DB.aportes.forEach(a=>{
+    if(a.status==='planejado' && a.data===dataStr){
+      const p=getItem(DB.potes,a.pote_id);
+      eventos.push({tipo:'aporte', id:a.id, descricao:`Aporte: ${p?p.nome:'Meta'}`, quem:a.pessoa, valor:a.valor, pago:false});
+    }
+  });
+  DB.parcelas.forEach(pc=>{
+    if(pc.status==='Pendente' && pc.vencimento===dataStr){
+      const pl=getItem(DB.parcelamentos,pc.parcelamento_id);
+      eventos.push({tipo:'parcela', id:pc.id, descricao:`${pl?pl.descricao:'Parcela'} (${pc.numero}/${pl?pl.qtd_parcelas:'?'})`, quem:pl?pl.pessoa_deve:'', valor:pc.valor, pago:false});
+    }
+  });
+  return eventos;
 }
 SECTIONS.calendario=()=>{
   gerarDespesasFixasDoMes();
@@ -1716,7 +1752,7 @@ SECTIONS.calendario=()=>{
       </div>
       <div class="cal-grid">${celulas.join('')}</div>
     </div>
-    <div style="padding:10px 16px;font-size:11px;color:var(--cinza-med);border-top:1px solid var(--cinza-claro)">💡 Barra vermelha = tem despesa vencendo nesse dia. Clique num dia pra ver detalhes.</div>
+    <div style="padding:10px 16px;font-size:11px;color:var(--cinza-med);border-top:1px solid var(--cinza-claro)">💡 Barra vermelha = tem despesa, aporte planejado ou parcela vencendo nesse dia. Clique num dia pra ver detalhes e confirmar.</div>
   </div>`;
 };
 function mudarMesCal(delta){
@@ -1726,14 +1762,23 @@ function mudarMesCal(delta){
   render('calendario');
 }
 function abrirDetalheDiaCal(dataStr){
-  const doDia=DB.despesas.filter(x=>normalizarData(x.venc)===dataStr);
+  const eventos=eventosFinanceirosDoDia(dataStr);
   openModal(`📅 ${dataStr.split('-').reverse().join('/')}`,
-    doDia.length===0?`<p style="text-align:center;color:var(--cinza-med);padding:20px">Nada nesse dia.</p>`:
-    `<div class="tbl-wrap"><table><thead><tr><th>Descrição</th><th>Quem</th><th>Valor</th><th>Status</th></tr></thead>
-    <tbody>${doDia.map(x=>`<tr style="cursor:pointer" onclick="closeModal();editarDespesa('${x.id}')">
-      <td class="fw-bold">${x.descricao}</td><td><span class="badge badge-${x.tipo}">${nomePessoa(x.tipo)}</span></td>
-      <td class="fw-bold text-vermelho">${R$(x.valor)}</td><td>${x.status==='Pago'?'<span class="badge badge-ok">PAGO</span>':'<span class="badge badge-warn">EM ABERTO</span>'}</td>
-    </tr>`).join('')}</tbody></table></div>`,
+    eventos.length===0?`<p style="text-align:center;color:var(--cinza-med);padding:20px">Nada nesse dia.</p>`:
+    `<div class="tbl-wrap"><table><thead><tr><th>Descrição</th><th>Quem</th><th>Valor</th><th>Ações</th></tr></thead>
+    <tbody>${eventos.map(ev=>{
+      const icone=ev.tipo==='despesa'?'🧾':ev.tipo==='aporte'?'🎯':'📅';
+      let acao;
+      if(ev.tipo==='despesa') acao=`<button class="btn btn-primary btn-xs" onclick="closeModal();editarDespesa('${ev.id}')">✏️</button>`;
+      else if(ev.tipo==='aporte') acao=`<button class="btn btn-success btn-xs" onclick="confirmarAporte('${ev.id}');closeModal()">✅ Confirmar</button>`;
+      else acao=`<button class="btn btn-success btn-xs" onclick="closeModal();confirmarPagamentoParcela('${ev.id}')">✅ Confirmar</button>`;
+      return `<tr>
+        <td class="fw-bold">${icone} ${ev.descricao}</td>
+        <td>${ev.quem?`<span class="badge badge-${ev.quem}">${nomePessoa(ev.quem)}</span>`:'—'}</td>
+        <td class="fw-bold text-vermelho">${R$(ev.valor)}</td>
+        <td>${ev.pago?'<span class="badge badge-ok">PAGO</span>':acao}</td>
+      </tr>`;
+    }).join('')}</tbody></table></div>`,
     ()=>closeModal(),'Fechar');
   document.getElementById('modal-save-btn').style.display='none';
 }
