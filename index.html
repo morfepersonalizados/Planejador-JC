@@ -657,6 +657,113 @@ function R$(v){ return 'R$ '+(+v||0).toLocaleString('pt-BR',{minimumFractionDigi
 function ordNome(arr){ return [...(arr||[])].sort((a,b)=>(a.nome||a.descricao||'').localeCompare(b.nome||b.descricao||'')); }
 
 // ═══════════════════════════════════════════════════════════════
+// UTILITÁRIOS FINANCEIROS (metas com prazo flexível, divisão de
+// valores sem erro de arredondamento, saldo líquido entre os dois)
+// ═══════════════════════════════════════════════════════════════
+
+// Divide um valor total entre pesos (ex: rendas) garantindo que a soma das
+// partes bate EXATAMENTE com o total (método dos maiores restos, em
+// centavos) — evita que 0,01 "suma" ou "sobre" por causa de arredondamento.
+function dividirValorExato(total, pesos){
+  const totalCent = Math.round((+total||0)*100);
+  const somaPesos = pesos.reduce((s,p)=>s+(+p||0),0);
+  if(somaPesos<=0){
+    const n=pesos.length;
+    const base=Math.floor(totalCent/n);
+    const partes=new Array(n).fill(base);
+    let resto=totalCent-base*n;
+    for(let i=0;i<resto;i++) partes[i]++;
+    return partes.map(c=>c/100);
+  }
+  const brutos=pesos.map(p=>totalCent*((+p||0)/somaPesos));
+  const partesCent=brutos.map(Math.floor);
+  const alocado=partesCent.reduce((s,v)=>s+v,0);
+  const resto=totalCent-alocado;
+  const restos=brutos.map((v,i)=>({i, frac:v-Math.floor(v)}));
+  restos.sort((a,b)=>b.frac-a.frac);
+  for(let k=0;k<resto;k++){ partesCent[restos[k%restos.length].i]++; }
+  return partesCent.map(c=>c/100);
+}
+function diasEntre(dataA, dataB){
+  const a=new Date(dataA+'T00:00:00'), b=new Date(dataB+'T00:00:00');
+  return Math.round((b-a)/86400000);
+}
+// Converte uma duração (anos/meses/semanas/dias, combináveis) numa data
+// final real, a partir da data de início da meta.
+function calcularPrazoData(dataInicio, duracao){
+  const d = new Date((dataInicio||new Date().toISOString().slice(0,10))+'T00:00:00');
+  d.setFullYear(d.getFullYear() + (+duracao.anos||0));
+  d.setMonth(d.getMonth() + (+duracao.meses||0));
+  d.setDate(d.getDate() + (+duracao.semanas||0)*7 + (+duracao.dias||0));
+  return d.toISOString().slice(0,10);
+}
+// Quanto falta guardar por dia/semana/mês pra bater a meta no prazo.
+// "por_mes" usa média de dias por mês (365,25/12) — é uma estimativa,
+// não conta mês-calendário exato, mas é o suficiente pra planejamento.
+function calcularNecessidadesMeta(valorRestante, hoje, prazoData){
+  if(!prazoData) return { dias_restantes:null, semanas_restantes:null, meses_restantes:null, por_dia:null, por_semana:null, por_mes:null };
+  const diasRestantes=Math.max(0, diasEntre(hoje, prazoData));
+  const semanasRestantes=diasRestantes/7;
+  const mesesRestantes=diasRestantes/30.4368;
+  return {
+    dias_restantes: diasRestantes,
+    semanas_restantes: semanasRestantes,
+    meses_restantes: mesesRestantes,
+    por_dia: diasRestantes>0? valorRestante/diasRestantes : valorRestante,
+    por_semana: semanasRestantes>0? valorRestante/semanasRestantes : valorRestante,
+    por_mes: mesesRestantes>0? valorRestante/mesesRestantes : valorRestante,
+  };
+}
+// Datas de vencimento de cada parcela de um parcelamento, a partir da
+// primeira parcela — mensal respeita o dia certinho, com o mesmo cuidado
+// de "cair no último dia do mês" já usado em despesas fixas (ex: parcela
+// no dia 31 de um mês que só tem 28/30 dias).
+function gerarDatasParcelas(dataPrimeira, qtd, frequencia){
+  const passoDias = frequencia==='semanal'?7 : frequencia==='quinzenal'?15 : 30;
+  const base = new Date(dataPrimeira+'T00:00:00');
+  const datas=[];
+  for(let n=1;n<=qtd;n++){
+    let venc;
+    if(frequencia==='mensal'){
+      const anoBase=base.getFullYear(), mesBase=base.getMonth(), diaBase=base.getDate();
+      const mesAlvo=mesBase+(n-1);
+      const ultimoDia=new Date(anoBase, mesAlvo+1, 0).getDate();
+      venc=new Date(anoBase, mesAlvo, Math.min(diaBase, ultimoDia));
+    } else {
+      venc=new Date(base); venc.setDate(base.getDate()+passoDias*(n-1));
+    }
+    datas.push(venc.toISOString().slice(0,10));
+  }
+  return datas;
+}
+// Saldo líquido entre as duas pessoas: soma as partes não pagas de cada
+// "divisão" avulsa (quem não pagou deve a parte dele pra quem pagou) e as
+// parcelas pendentes/atrasadas de cada parcelamento, nas duas direções, e
+// devolve só o saldo final com direção — sem juntar as duas dívidas como
+// se fossem independentes (o histórico original continua intacto).
+function calcularSaldoLiquido(divisoes, parcelas, parcelamentos){
+  let p1DeveP2=0, p2DeveP1=0;
+  (divisoes||[]).forEach(d=>{
+    if(d.pago_por==='p1') p2DeveP1+=(+d.parte_p2||0);
+    else if(d.pago_por==='p2') p1DeveP2+=(+d.parte_p1||0);
+  });
+  const parcelamentosById={}; (parcelamentos||[]).forEach(p=>parcelamentosById[p.id]=p);
+  (parcelas||[]).forEach(pc=>{
+    if(pc.status!=='Pendente' && pc.status!=='Atrasado') return;
+    const pl=parcelamentosById[pc.parcelamento_id]; if(!pl) return;
+    if(pl.pessoa_deve==='p1') p1DeveP2+=(+pc.valor||0);
+    else if(pl.pessoa_deve==='p2') p2DeveP1+=(+pc.valor||0);
+  });
+  const liquido=p1DeveP2-p2DeveP1;
+  return {
+    p1_deve_p2: Math.round(p1DeveP2*100)/100,
+    p2_deve_p1: Math.round(p2DeveP1*100)/100,
+    liquido_valor: Math.round(Math.abs(liquido)*100)/100,
+    liquido_direcao: liquido>0.004?'p1_para_p2': liquido<-0.004?'p2_para_p1':'quites'
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════
 // NAVEGAÇÃO
 // ═══════════════════════════════════════════════════════════════
 let currentSection='dashboard';
