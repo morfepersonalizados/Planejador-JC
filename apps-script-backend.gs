@@ -13,7 +13,8 @@
 
 // Tabelas do sistema
 var TABELAS = [
-  'config', 'entradas', 'despesas_fixas', 'despesas', 'potes', 'aportes'
+  'config', 'entradas', 'despesas_fixas', 'despesas', 'potes', 'aportes',
+  'divisoes', 'parcelamentos', 'parcelas'
 ];
 
 // ============================================================

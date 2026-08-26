@@ -213,6 +213,7 @@ tbody tr:hover{background:var(--cinza-ultra)}
         <div class="nav-item" onclick="goTo('despesasfixas')"><span class="nav-icon">📌</span> Despesas Fixas</div>
         <div class="nav-item" onclick="goTo('despesas')"><span class="nav-icon">🧾</span> Despesas do Mês</div>
         <div class="nav-item" onclick="goTo('metas')"><span class="nav-icon">🎯</span> Metas & Potes</div>
+        <div class="nav-item" onclick="goTo('acertos')"><span class="nav-icon">🤝</span> Acertos</div>
       </div>
     </div>
     <div class="nav-group" data-grupo="sistema">
@@ -270,9 +271,10 @@ let _sessaoExpirada = false; // true quando a sincronização falhou por token v
 let DB = {
   config:{pessoa1_nome:'Pessoa 1', pessoa2_nome:'Pessoa 2', renda_base_p1:0, renda_base_p2:0, modo_divisao:'proporcional', meta_economia_pct:20,
     origem_renda_p1:'', origem_renda_p2:'', dia_recebimento_p1:0, dia_recebimento_p2:0, frequencia_renda_p1:'mensal', frequencia_renda_p2:'mensal'},
-  entradas:[], despesas_fixas:[], despesas:[], potes:[], aportes:[]
+  entradas:[], despesas_fixas:[], despesas:[], potes:[], aportes:[],
+  divisoes:[], parcelamentos:[], parcelas:[]
 };
-const TABELAS = ['config','entradas','despesas_fixas','despesas','potes','aportes'];
+const TABELAS = ['config','entradas','despesas_fixas','despesas','potes','aportes','divisoes','parcelamentos','parcelas'];
 
 // ═══════════════════════════════════════════════════════════════
 // AUTENTICAÇÃO / LOGIN
@@ -769,7 +771,7 @@ function calcularSaldoLiquido(divisoes, parcelas, parcelamentos){
 // ═══════════════════════════════════════════════════════════════
 let currentSection='dashboard';
 const SECTIONS={};
-const TITULOS={dashboard:'Dashboard', calendario:'Calendário', entradas:'Entradas', despesasfixas:'Despesas Fixas', despesas:'Despesas do Mês', metas:'Metas & Potes', config:'Configurações'};
+const TITULOS={dashboard:'Dashboard', calendario:'Calendário', entradas:'Entradas', despesasfixas:'Despesas Fixas', despesas:'Despesas do Mês', metas:'Metas & Potes', acertos:'Acertos', config:'Configurações'};
 function goTo(sec){
   currentSection=sec;
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.remove('active'));
@@ -1447,6 +1449,219 @@ function verDetalheMeta(poteId){
     </div>`,
     ()=>closeModal(),'Fechar');
   document.getElementById('modal-save-btn').style.display='none';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ACERTOS — quem deve pra quem (compras avulsas divididas e
+// parcelamentos entre as duas pessoas). Área separada de "Despesas do
+// Mês" por decisão do usuário: aqui é pra compra específica/dívida
+// pontual entre os dois, não pro orçamento mensal do casal.
+// ═══════════════════════════════════════════════════════════════
+SECTIONS.acertos=()=>{
+  const saldo=calcularSaldoLiquido(DB.divisoes, DB.parcelas, DB.parcelamentos);
+  const divisoesOrd=[...DB.divisoes].sort((a,b)=>(b.data||'').localeCompare(a.data||''));
+  const parcelamentosOrd=[...DB.parcelamentos].sort((a,b)=>(b.criado_em||'').localeCompare(a.criado_em||''));
+  const hoje=new Date().toISOString().slice(0,10);
+  return `
+  <div class="panel">
+    <div class="panel-header"><span class="panel-title">🤝 Saldo entre vocês</span></div>
+    <div style="padding:24px;text-align:center">
+      ${saldo.liquido_direcao==='quites'?
+        `<div style="font-size:19px;font-weight:800;color:var(--txt-verde)">✅ Quites! Ninguém deve nada pra ninguém.</div>`:
+        `<div style="font-size:13px;color:var(--cinza-med)">${nomePessoa(saldo.liquido_direcao==='p1_para_p2'?'p1':'p2')} deve pra ${nomePessoa(saldo.liquido_direcao==='p1_para_p2'?'p2':'p1')}</div>
+         <div style="font-size:32px;font-weight:900;color:var(--txt-vermelho);margin-top:4px">${R$(saldo.liquido_valor)}</div>`}
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-header"><span class="panel-title">🧾 Divisões (compras avulsas)</span><button class="btn btn-success btn-sm" onclick="novaDivisao()">+ Nova Divisão</button></div>
+    ${divisoesOrd.length===0?`<div class="empty-state"><div class="empty-icon">🧾</div>Nenhuma divisão registrada ainda. Ex: um tênis, um presente, um jantar dividido.</div>`:
+    `<div class="tbl-wrap"><table>
+      <thead><tr><th>Data</th><th>Descrição</th><th>Total</th><th>Pagou</th><th>Quem deve</th><th>Ações</th></tr></thead>
+      <tbody>${divisoesOrd.map(d=>{
+        const quemDeve=d.pago_por==='p1'?'p2':'p1';
+        const parteDevida=quemDeve==='p1'?d.parte_p1:d.parte_p2;
+        return `<tr>
+          <td>${d.data||'—'}</td><td class="fw-bold">${d.descricao}</td><td>${R$(d.valor_total)}</td>
+          <td><span class="badge badge-${d.pago_por}">${nomePessoa(d.pago_por)}</span></td>
+          <td class="text-vermelho fw-bold">${nomePessoa(quemDeve)}: ${R$(parteDevida)}</td>
+          <td><button class="btn btn-primary btn-xs" onclick="editarDivisao('${d.id}')">✏️</button> <button class="btn btn-danger btn-xs" onclick="excluirItem('divisoes','${d.id}')">🗑️</button></td>
+        </tr>`;}).join('')}</tbody>
+    </table></div>`}
+  </div>
+  <div class="panel">
+    <div class="panel-header"><span class="panel-title">📅 Parcelamentos entre vocês</span><button class="btn btn-success btn-sm" onclick="novoParcelamento()">+ Novo Parcelamento</button></div>
+    ${parcelamentosOrd.length===0?`<div class="empty-state"><div class="empty-icon">📅</div>Nenhum parcelamento cadastrado. Ex: "Comprei uma cama, pago R$40/mês pra você".</div>`:
+    parcelamentosOrd.map(pl=>{
+      const parcelasPl=DB.parcelas.filter(x=>x.parcelamento_id===pl.id).sort((a,b)=>a.numero-b.numero);
+      const pagas=parcelasPl.filter(x=>x.status==='Pago');
+      const totalPago=pagas.reduce((s,x)=>s+(+x.valor_pago||+x.valor||0),0);
+      const proxima=parcelasPl.find(x=>x.status==='Pendente');
+      return `<div style="padding:14px;border-top:1px solid var(--cinza-claro)">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <div><b>${pl.descricao}</b> <span class="badge badge-${pl.pessoa_deve}">${nomePessoa(pl.pessoa_deve)} deve ${nomePessoa(pl.pessoa_recebe)}</span></div>
+          <button class="btn btn-danger btn-xs" onclick="excluirParcelamento('${pl.id}')">🗑️ Excluir</button>
+        </div>
+        <div style="font-size:12px;color:var(--cinza-med);margin-top:4px">${R$(totalPago)} pagos de ${R$(pl.valor_total)} · ${pagas.length}/${pl.qtd_parcelas} parcelas · ${proxima?`próxima: ${R$(proxima.valor)} em ${proxima.vencimento.split('-').reverse().join('/')}`:'quitado ✅'}</div>
+        <div class="tbl-wrap" style="margin-top:8px"><table>
+          <thead><tr><th>#</th><th>Vencimento</th><th>Valor</th><th>Status</th><th>Ações</th></tr></thead>
+          <tbody>${parcelasPl.map(pc=>{
+            const statusVisual=(pc.status==='Pendente' && pc.vencimento<hoje)?'Atrasado':pc.status;
+            const badgeClasse=statusVisual==='Pago'?'badge-ok':statusVisual==='Atrasado'?'badge-danger':statusVisual==='Cancelado'?'badge-gray':'badge-warn';
+            return `<tr>
+              <td>${pc.numero}</td><td>${pc.vencimento.split('-').reverse().join('/')}</td><td>${R$(pc.valor)}</td>
+              <td><span class="badge ${badgeClasse}">${statusVisual}</span></td>
+              <td>${pc.status==='Pendente'?`<button class="btn btn-success btn-xs" onclick="confirmarPagamentoParcela('${pc.id}')" title="Confirmar pagamento">✅</button> <button class="btn btn-outline btn-xs" onclick="cancelarParcela('${pc.id}')" title="Cancelar parcela">✖</button>`:'—'}</td>
+            </tr>`;}).join('')}</tbody>
+        </table></div>
+      </div>`;
+    }).join('')}
+  </div>`;
+};
+function calcularPartesDivisaoForm(){
+  const total=parseFloat(document.getElementById('f-divvalor').value)||0;
+  const forma=document.getElementById('f-divforma').value;
+  if(forma==='personalizado'){
+    return { p1:parseFloat(document.getElementById('f-divpersp1').value)||0, p2:parseFloat(document.getElementById('f-divpersp2').value)||0 };
+  }
+  if(forma==='proporcional'){
+    const [p1,p2]=dividirValorExato(total, [rendaBasePessoa('p1'), rendaBasePessoa('p2')]);
+    return {p1,p2};
+  }
+  const [p1,p2]=dividirValorExato(total, [1,1]);
+  return {p1,p2};
+}
+function atualizarPreviewDivisao(){
+  const forma=document.getElementById('f-divforma').value;
+  document.getElementById('f-divcampo-p1').style.display=forma==='personalizado'?'':'none';
+  document.getElementById('f-divcampo-p2').style.display=forma==='personalizado'?'':'none';
+  const {p1,p2}=calcularPartesDivisaoForm();
+  const total=parseFloat(document.getElementById('f-divvalor').value)||0;
+  const pagou=document.getElementById('f-divpagou').value;
+  const quemDeve=pagou==='p1'?'p2':'p1';
+  const parteDevida=quemDeve==='p1'?p1:p2;
+  const soma=Math.round((p1+p2)*100)/100;
+  const bateTotal=Math.abs(soma-total)<0.02;
+  document.getElementById('f-divpreview').innerHTML=`${nomePessoa('p1')}: ${R$(p1)} · ${nomePessoa('p2')}: ${R$(p2)}`+
+    (!bateTotal?` <span style="color:var(--txt-vermelho)">⚠️ soma (${R$(soma)}) não bate com o total</span>`:` → <b>${nomePessoa(quemDeve)} deve ${R$(parteDevida)} pra ${nomePessoa(pagou)}</b>`);
+}
+function formDivisao(d={}){
+  return `<div class="form-grid">
+    <div class="form-group full"><label class="form-label">Descrição</label><input class="form-input" id="f-divdesc" value="${d.descricao||''}" placeholder="Ex: Tênis, Presente, Jantar..."></div>
+    <div class="form-group"><label class="form-label">Valor Total (R$)</label><input class="form-input" id="f-divvalor" type="number" step="0.01" value="${d.valor_total||''}" oninput="atualizarPreviewDivisao()"></div>
+    <div class="form-group"><label class="form-label">Data</label><input class="form-input" id="f-divdata" type="date" value="${d.data||new Date().toISOString().slice(0,10)}"></div>
+    <div class="form-group"><label class="form-label">Quem pagou</label><select class="form-select" id="f-divpagou" onchange="atualizarPreviewDivisao()">
+      <option value="p1" ${(!d.pago_por||d.pago_por==='p1')?'selected':''}>${nomePessoa('p1')}</option>
+      <option value="p2" ${d.pago_por==='p2'?'selected':''}>${nomePessoa('p2')}</option>
+    </select></div>
+    <div class="form-group full"><label class="form-label">Como dividir</label><select class="form-select" id="f-divforma" onchange="atualizarPreviewDivisao()">
+      <option value="5050" ${(!d.forma_divisao||d.forma_divisao==='5050')?'selected':''}>50/50</option>
+      <option value="proporcional" ${d.forma_divisao==='proporcional'?'selected':''}>Proporcional à renda</option>
+      <option value="personalizado" ${d.forma_divisao==='personalizado'?'selected':''}>Valor personalizado</option>
+    </select></div>
+    <div class="form-group" id="f-divcampo-p1" style="display:${d.forma_divisao==='personalizado'?'':'none'}"><label class="form-label">Parte — ${nomePessoa('p1')} (R$)</label><input class="form-input" id="f-divpersp1" type="number" step="0.01" value="${d.parte_p1||''}" oninput="atualizarPreviewDivisao()"></div>
+    <div class="form-group" id="f-divcampo-p2" style="display:${d.forma_divisao==='personalizado'?'':'none'}"><label class="form-label">Parte — ${nomePessoa('p2')} (R$)</label><input class="form-input" id="f-divpersp2" type="number" step="0.01" value="${d.parte_p2||''}" oninput="atualizarPreviewDivisao()"></div>
+    <div class="form-group full"><label class="form-label">Observação (opcional)</label><input class="form-input" id="f-divobs" value="${d.observacao||''}"></div>
+    <div class="form-group full" id="f-divpreview" style="font-size:12.5px;color:var(--cinza-med)"></div>
+  </div>`;
+}
+function novaDivisao(){ openModal('➕ Nova Divisão', formDivisao(), ()=>salvarDivisao()); atualizarPreviewDivisao(); }
+function editarDivisao(id){ openModal('✏️ Editar Divisão', formDivisao(getItem(DB.divisoes,id)), ()=>salvarDivisao(id)); atualizarPreviewDivisao(); }
+async function salvarDivisao(id=null){
+  const existente=id?getItem(DB.divisoes,id):null;
+  const valorTotal=parseFloat(document.getElementById('f-divvalor').value)||0;
+  const forma=document.getElementById('f-divforma').value;
+  const {p1,p2}=calcularPartesDivisaoForm();
+  if(!document.getElementById('f-divdesc').value.trim()){toast('Informe a descrição','error');return;}
+  if(!valorTotal||valorTotal<=0){toast('Informe um valor válido','error');return;}
+  if(Math.abs((p1+p2)-valorTotal)>0.02){toast('A soma das partes precisa bater com o valor total','error');return;}
+  const obj={
+    id:id||nextId(DB.divisoes,'DIV'), descricao:document.getElementById('f-divdesc').value.trim(),
+    valor_total:valorTotal, pago_por:document.getElementById('f-divpagou').value, forma_divisao:forma,
+    parte_p1:p1, parte_p2:p2, data:document.getElementById('f-divdata').value,
+    observacao:document.getElementById('f-divobs').value.trim(),
+    criado_em:existente?existente.criado_em:new Date().toISOString()
+  };
+  await salvarItem('divisoes',obj); toast(id?'Atualizado!':'Divisão registrada!'); closeModal(); render('acertos');
+}
+function formParcelamento(){
+  return `<div class="form-grid">
+    <div class="form-group full"><label class="form-label">Descrição</label><input class="form-input" id="f-pldesc" value="" placeholder="Ex: Cama, Celular, Empréstimo..."></div>
+    <div class="form-group"><label class="form-label">Quem deve</label><select class="form-select" id="f-pldeve">
+      <option value="p1">${nomePessoa('p1')}</option>
+      <option value="p2" selected>${nomePessoa('p2')}</option>
+    </select></div>
+    <div class="form-group"><label class="form-label">Quem recebe</label><select class="form-select" id="f-plrecebe">
+      <option value="p2">${nomePessoa('p2')}</option>
+      <option value="p1" selected>${nomePessoa('p1')}</option>
+    </select></div>
+    <div class="form-group"><label class="form-label">Valor de cada parcela (R$)</label><input class="form-input" id="f-plvalor" type="number" step="0.01" value=""></div>
+    <div class="form-group"><label class="form-label">Quantidade de parcelas</label><input class="form-input" id="f-plqtd" type="number" min="1" value=""></div>
+    <div class="form-group"><label class="form-label">Frequência</label><select class="form-select" id="f-plfreq">
+      <option value="mensal">Mensal</option>
+      <option value="quinzenal">Quinzenal</option>
+      <option value="semanal">Semanal</option>
+    </select></div>
+    <div class="form-group"><label class="form-label">Data da 1ª parcela</label><input class="form-input" id="f-pldata1" type="date" value="${new Date().toISOString().slice(0,10)}"></div>
+  </div>`;
+}
+function novoParcelamento(){
+  openModal('➕ Novo Parcelamento', formParcelamento(), ()=>salvarParcelamento());
+  // "quem deve" e "quem recebe" nunca podem ser a mesma pessoa — ajusta o
+  // outro select automaticamente quando um dos dois muda.
+  document.getElementById('f-pldeve').onchange=function(){ if(this.value===document.getElementById('f-plrecebe').value) document.getElementById('f-plrecebe').value=this.value==='p1'?'p2':'p1'; };
+  document.getElementById('f-plrecebe').onchange=function(){ if(this.value===document.getElementById('f-pldeve').value) document.getElementById('f-pldeve').value=this.value==='p1'?'p2':'p1'; };
+}
+async function salvarParcelamento(){
+  const descricao=document.getElementById('f-pldesc').value.trim();
+  const valorParcela=parseFloat(document.getElementById('f-plvalor').value)||0;
+  const qtd=parseInt(document.getElementById('f-plqtd').value)||0;
+  const pessoaDeve=document.getElementById('f-pldeve').value;
+  const pessoaRecebe=document.getElementById('f-plrecebe').value;
+  if(!descricao){toast('Informe a descrição','error');return;}
+  if(!valorParcela||valorParcela<=0){toast('Informe o valor da parcela','error');return;}
+  if(!qtd||qtd<=0){toast('Informe a quantidade de parcelas','error');return;}
+  if(pessoaDeve===pessoaRecebe){toast('Quem deve e quem recebe não podem ser a mesma pessoa','error');return;}
+  const frequencia=document.getElementById('f-plfreq').value;
+  const dataPrimeira=document.getElementById('f-pldata1').value||new Date().toISOString().slice(0,10);
+  const obj={
+    id:nextId(DB.parcelamentos,'PL'), descricao, valor_total:Math.round(valorParcela*qtd*100)/100,
+    pessoa_deve:pessoaDeve, pessoa_recebe:pessoaRecebe, valor_parcela:valorParcela, qtd_parcelas:qtd,
+    frequencia, data_primeira:dataPrimeira, criado_em:new Date().toISOString()
+  };
+  await salvarItem('parcelamentos',obj);
+  const datas=gerarDatasParcelas(dataPrimeira, qtd, frequencia);
+  for(let n=1;n<=qtd;n++){
+    const parcela={ id:nextId(DB.parcelas,'PARC'), parcelamento_id:obj.id, numero:n, valor:valorParcela,
+      vencimento:datas[n-1], status:'Pendente', data_pagamento:null, valor_pago:0, criado_em:new Date().toISOString() };
+    await salvarItem('parcelas',parcela);
+  }
+  toast('Parcelamento criado!'); closeModal(); render('acertos');
+}
+async function excluirParcelamento(id){
+  if(!confirm('Confirma excluir esse parcelamento e todas as parcelas dele?')) return;
+  const parcelasDoPl=DB.parcelas.filter(p=>p.parcelamento_id===id);
+  for(const p of parcelasDoPl){ await excluirItem_db('parcelas', p.id); }
+  await excluirItem_db('parcelamentos', id);
+  render('acertos');
+}
+function confirmarPagamentoParcela(parcelaId){
+  const pc=getItem(DB.parcelas, parcelaId); if(!pc) return;
+  openModal('✅ Confirmar Pagamento',
+    `<div class="form-grid cols-1">
+      <div class="form-group"><label class="form-label">Valor pago (R$)</label><input class="form-input" id="f-pcvalor" type="number" step="0.01" value="${pc.valor}"></div>
+      <div class="form-group"><label class="form-label">Data do pagamento</label><input class="form-input" id="f-pcdata" type="date" value="${new Date().toISOString().slice(0,10)}"></div>
+    </div>`,
+    async()=>{
+      pc.status='Pago'; pc.valor_pago=parseFloat(document.getElementById('f-pcvalor').value)||pc.valor;
+      pc.data_pagamento=document.getElementById('f-pcdata').value;
+      await salvarItem('parcelas', pc); toast('Pagamento confirmado! 🎉'); closeModal(); render('acertos');
+    }, '✅ Confirmar');
+}
+async function cancelarParcela(parcelaId){
+  const pc=getItem(DB.parcelas, parcelaId); if(!pc) return;
+  if(!confirm('Cancelar essa parcela?')) return;
+  pc.status='Cancelado';
+  await salvarItem('parcelas', pc); render('acertos');
 }
 
 // ═══════════════════════════════════════════════════════════════
