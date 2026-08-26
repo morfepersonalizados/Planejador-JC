@@ -896,12 +896,43 @@ function gerarDespesasFixasDoMes(){
 // aportes (nunca guardado direto), pra manter um extrato auditável de
 // quem colocou quanto e quando
 // ═══════════════════════════════════════════════════════════════
+// Divide a contribuição mensal de uma meta "casal" entre as duas pessoas,
+// conforme a forma escolhida — reaproveita dividirValorExato pra nunca
+// deixar sobrar/faltar centavo entre as duas partes.
+function contribuicaoPorPessoaMeta(p, contribMensal){
+  if(p.forma_contribuicao==='personalizado'){
+    return { p1:+p.contrib_personalizada_p1||0, p2:+p.contrib_personalizada_p2||0 };
+  }
+  if(p.quem==='p1') return { p1:contribMensal, p2:0 };
+  if(p.quem==='p2') return { p1:0, p2:contribMensal };
+  if(p.forma_contribuicao==='proporcional'){
+    const [p1,p2]=dividirValorExato(contribMensal, [rendaBasePessoa('p1'), rendaBasePessoa('p2')]);
+    return { p1, p2 };
+  }
+  const [p1,p2]=dividirValorExato(contribMensal, [1,1]);
+  return { p1, p2 };
+}
+// valor_atual só soma aportes CONFIRMADOS (aportes antigos sem "status"
+// contam como confirmados — retrocompatível). Aportes com status
+// "planejado" ficam à parte, pra aparecer no calendário como pendência.
 function potesComProgresso(){
+  const hoje=new Date().toISOString().slice(0,10);
   return ordNome(DB.potes).map(p=>{
-    const aportesP=DB.aportes.filter(a=>a.pote_id===p.id);
-    const valorAtual=aportesP.reduce((s,a)=>s+(+a.valor||0),0);
-    const pct=p.meta_valor>0?Math.min(100, valorAtual/p.meta_valor*100):0;
-    return {...p, valor_atual:valorAtual, pct, aportes:aportesP};
+    const aportesDaMeta=DB.aportes.filter(a=>a.pote_id===p.id);
+    const aportesConfirmados=aportesDaMeta.filter(a=>a.status!=='planejado');
+    const aportesPlanejados=aportesDaMeta.filter(a=>a.status==='planejado');
+    const valorAtual=aportesConfirmados.reduce((s,a)=>s+(+a.valor||0),0);
+    const metaValor=+p.meta_valor||0;
+    const valorRestante=Math.max(0, metaValor-valorAtual);
+    const pct=metaValor>0?Math.min(100, valorAtual/metaValor*100):0;
+    const prazoData=(p.prazo_modo && p.prazo_modo!=='sem_prazo')?p.prazo_data:null;
+    const necessidades=calcularNecessidadesMeta(valorRestante, hoje, prazoData);
+    const contribMensal=(p.contribuicao_mensal_planejada!=null && p.contribuicao_mensal_planejada!=='')?(+p.contribuicao_mensal_planejada||0):(necessidades.por_mes||0);
+    const contribPorPessoa=contribuicaoPorPessoaMeta(p, contribMensal);
+    return {...p, valor_atual:valorAtual, valor_restante:valorRestante, pct,
+      aportes:aportesConfirmados, aportes_planejados:aportesPlanejados,
+      ...necessidades, contribuicao_mensal_efetiva:contribMensal,
+      contrib_calc_p1:contribPorPessoa.p1, contrib_calc_p2:contribPorPessoa.p2};
   });
 }
 
@@ -1172,50 +1203,184 @@ async function marcarDespesaPaga(id){
 SECTIONS.metas=()=>{
   const potes=potesComProgresso();
   const totalGuardado=potes.reduce((s,p)=>s+p.valor_atual,0);
+  const totalComprometidoMes=potes.reduce((s,p)=>s+(p.contribuicao_mensal_efetiva||0),0);
+  const prioridadeOrdem={alta:0, media:1, baixa:2};
+  const potesOrdenados=[...potes].sort((a,b)=>(prioridadeOrdem[a.prioridade||'media']-prioridadeOrdem[b.prioridade||'media']) || (a.prazo_data||'9999-99-99').localeCompare(b.prazo_data||'9999-99-99'));
   return `
   <div class="kpi-grid">
     <div class="kpi-card verde"><div class="kpi-label">Total Guardado</div><div class="kpi-value">${R$(totalGuardado)}</div></div>
-    <div class="kpi-card dourado"><div class="kpi-label">Metas Ativas</div><div class="kpi-value">${potes.length}</div></div>
+    <div class="kpi-card dourado"><div class="kpi-label">Comprometido/mês</div><div class="kpi-value">${R$(totalComprometidoMes)}</div></div>
+    <div class="kpi-card"><div class="kpi-label">Metas Ativas</div><div class="kpi-value">${potes.length}</div></div>
   </div>
   <div class="panel">
     <div class="panel-header"><span class="panel-title">🎯 Metas & Potes</span><button class="btn btn-success" onclick="novoPote()">+ Nova Meta</button></div>
     <div style="padding:16px">
       ${potes.length===0?`<div class="empty-state"><div class="empty-icon">🎯</div>Nenhuma meta criada ainda. Que tal "Viagem", "Reserva de Emergência" ou "Entrada do Apê"?</div>`:
       `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px">
-        ${potes.map(p=>`<div class="panel" style="margin:0;border-top:4px solid var(--verde-med)">
+        ${potesOrdenados.map(p=>{
+          const corPrioridade=p.prioridade==='alta'?'vermelho':p.prioridade==='baixa'?'verde':'amarelo';
+          const labelPrioridade=p.prioridade==='alta'?'Alta':p.prioridade==='baixa'?'Baixa':'Média';
+          return `<div class="panel" style="margin:0;border-top:4px solid var(--verde-med);cursor:pointer" onclick="verDetalheMeta('${p.id}')">
           <div style="padding:14px">
-            <div style="font-size:15px;font-weight:800;color:var(--txt-azul)">${p.icone||'🎯'} ${p.nome}</div>
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:6px">
+              <div style="font-size:15px;font-weight:800;color:var(--txt-azul)">${p.icone||'🎯'} ${p.nome}</div>
+              <span class="badge" style="background:var(--${corPrioridade}-claro);color:var(--txt-${corPrioridade});white-space:nowrap">${labelPrioridade}</span>
+            </div>
             <div style="margin-top:10px" class="progress-bar-bg"><div class="progress-bar-fill" style="width:${p.pct}%;background:${p.pct>=100?'var(--dourado-escuro)':'var(--verde-med)'}"></div></div>
             <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:12px">
               <span style="color:var(--cinza-med)">${R$(p.valor_atual)} de ${R$(p.meta_valor)}</span>
               <b>${p.pct.toFixed(0)}%</b>
             </div>
-            <div style="display:flex;gap:6px;margin-top:12px">
+            <div style="font-size:11px;color:var(--cinza-med);margin-top:6px">${p.prazo_data?`⏳ ${p.dias_restantes}d restantes · ${R$(p.por_mes)}/mês`:'Sem prazo definido'}</div>
+            <div style="display:flex;gap:6px;margin-top:12px" onclick="event.stopPropagation()">
               <button class="btn btn-success btn-sm" style="flex:1" onclick="aportarPote('${p.id}')">💰 Aportar</button>
               <button class="btn btn-primary btn-xs" onclick="editarPote('${p.id}')">✏️</button>
               <button class="btn btn-danger btn-xs" onclick="excluirItem('potes','${p.id}')">🗑️</button>
             </div>
           </div>
-        </div>`).join('')}
+        </div>`;}).join('')}
       </div>`}
     </div>
   </div>`;
 };
 function formPote(p={}){
+  const prazoModo=p.prazo_modo||'sem_prazo';
+  const dur=p.prazo_duracao||{};
   return `<div class="form-grid">
     <div class="form-group full"><label class="form-label">Nome da meta</label><input class="form-input" id="f-potenome" value="${p.nome||''}" placeholder="Ex: Viagem, Reserva de Emergência..."></div>
+    <div class="form-group full"><label class="form-label">Descrição (opcional)</label><input class="form-input" id="f-potedesc" value="${p.descricao||''}"></div>
     <div class="form-group"><label class="form-label">Ícone (emoji)</label><input class="form-input" id="f-poteicone" value="${p.icone||'🎯'}"></div>
+    <div class="form-group"><label class="form-label">Tipo</label><select class="form-select" id="f-potetipo">
+      <option value="objetivo" ${(!p.tipo_meta||p.tipo_meta==='objetivo')?'selected':''}>🎯 Objetivo</option>
+      <option value="investimento" ${p.tipo_meta==='investimento'?'selected':''}>📈 Investimento</option>
+    </select></div>
     <div class="form-group"><label class="form-label">Valor da Meta (R$)</label><input class="form-input" id="f-potemeta" type="number" step="0.01" value="${p.meta_valor||''}"></div>
+    ${p.id?'':`<div class="form-group"><label class="form-label">Já tem guardado? (R$, opcional)</label><input class="form-input" id="f-potevalorinicial" type="number" step="0.01" value=""></div>`}
+    <div class="form-group full"><label class="form-label">Data de início</label><input class="form-input" id="f-potedatainicio" type="date" value="${p.data_inicio||new Date().toISOString().slice(0,10)}"></div>
+
+    <div class="form-group full"><label class="form-label">Prazo</label>
+      <select class="form-select" id="f-poteprazomodo" onchange="atualizarCamposPrazoMeta()">
+        <option value="sem_prazo" ${prazoModo==='sem_prazo'?'selected':''}>Sem prazo definido</option>
+        <option value="data" ${prazoModo==='data'?'selected':''}>Data específica</option>
+        <option value="duracao" ${prazoModo==='duracao'?'selected':''}>Quantidade de tempo (ex: 2 anos, 3 meses)</option>
+      </select>
+    </div>
+    <div class="form-group full" id="f-potecampo-data" style="display:${prazoModo==='data'?'':'none'}">
+      <label class="form-label">Prazo até</label>
+      <input class="form-input" id="f-poteprazodata" type="date" value="${p.prazo_modo==='data'?(p.prazo_data||''):''}">
+    </div>
+    <div class="form-group full" id="f-potecampo-duracao" style="display:${prazoModo==='duracao'?'':'none'}">
+      <label class="form-label">Daqui a quanto tempo?</label>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+        <div><label class="form-label" style="font-size:10px">Anos</label><input class="form-input" id="f-poteduranos" type="number" min="0" value="${dur.anos||0}"></div>
+        <div><label class="form-label" style="font-size:10px">Meses</label><input class="form-input" id="f-potedurmeses" type="number" min="0" value="${dur.meses||0}"></div>
+        <div><label class="form-label" style="font-size:10px">Semanas</label><input class="form-input" id="f-potedursemanas" type="number" min="0" value="${dur.semanas||0}"></div>
+        <div><label class="form-label" style="font-size:10px">Dias</label><input class="form-input" id="f-potedurdias" type="number" min="0" value="${dur.dias||0}"></div>
+      </div>
+    </div>
+
+    <div class="form-group full"><label class="form-label">Prioridade</label><select class="form-select" id="f-poteprioridade">
+      <option value="alta" ${p.prioridade==='alta'?'selected':''}>🔴 Alta</option>
+      <option value="media" ${(!p.prioridade||p.prioridade==='media')?'selected':''}>🟡 Média</option>
+      <option value="baixa" ${p.prioridade==='baixa'?'selected':''}>🟢 Baixa</option>
+    </select></div>
+
+    <div class="form-group full"><label class="form-label">Quem participa dessa meta?</label>
+      <select class="form-select" id="f-potequem" onchange="atualizarCamposFormaMeta()">
+        <option value="casal" ${(!p.quem||p.quem==='casal')?'selected':''}>Os dois juntos</option>
+        <option value="p1" ${p.quem==='p1'?'selected':''}>Só ${nomePessoa('p1')}</option>
+        <option value="p2" ${p.quem==='p2'?'selected':''}>Só ${nomePessoa('p2')}</option>
+      </select>
+    </div>
+    <div class="form-group full" id="f-potecampo-forma" style="display:${(!p.quem||p.quem==='casal')?'':'none'}">
+      <label class="form-label">Forma de contribuição</label>
+      <select class="form-select" id="f-poteforma" onchange="atualizarCamposFormaMeta()">
+        <option value="5050" ${(!p.forma_contribuicao||p.forma_contribuicao==='5050')?'selected':''}>50% para cada</option>
+        <option value="proporcional" ${p.forma_contribuicao==='proporcional'?'selected':''}>Proporcional à renda</option>
+        <option value="personalizado" ${p.forma_contribuicao==='personalizado'?'selected':''}>Valor personalizado pra cada um</option>
+      </select>
+    </div>
+    <div class="form-group" id="f-potecampo-pers-p1" style="display:${p.forma_contribuicao==='personalizado'?'':'none'}">
+      <label class="form-label">Contrib. mensal — ${nomePessoa('p1')} (R$)</label>
+      <input class="form-input" id="f-potepersp1" type="number" step="0.01" value="${p.contrib_personalizada_p1||''}">
+    </div>
+    <div class="form-group" id="f-potecampo-pers-p2" style="display:${p.forma_contribuicao==='personalizado'?'':'none'}">
+      <label class="form-label">Contrib. mensal — ${nomePessoa('p2')} (R$)</label>
+      <input class="form-input" id="f-potepersp2" type="number" step="0.01" value="${p.contrib_personalizada_p2||''}">
+    </div>
+
+    <div class="form-group full"><label class="form-label">Contribuição mensal planejada (R$, opcional)</label>
+      <input class="form-input" id="f-potecontribmensal" type="number" step="0.01" value="${p.contribuicao_mensal_planejada!=null?p.contribuicao_mensal_planejada:''}" placeholder="Em branco = calculado automaticamente pelo prazo">
+    </div>
   </div>`;
+}
+function atualizarCamposPrazoMeta(){
+  const modo=document.getElementById('f-poteprazomodo').value;
+  document.getElementById('f-potecampo-data').style.display=modo==='data'?'':'none';
+  document.getElementById('f-potecampo-duracao').style.display=modo==='duracao'?'':'none';
+}
+function atualizarCamposFormaMeta(){
+  const quem=document.getElementById('f-potequem').value;
+  const campoForma=document.getElementById('f-potecampo-forma');
+  campoForma.style.display=quem==='casal'?'':'none';
+  const forma=document.getElementById('f-poteforma').value;
+  const showPers=quem==='casal' && forma==='personalizado';
+  document.getElementById('f-potecampo-pers-p1').style.display=showPers?'':'none';
+  document.getElementById('f-potecampo-pers-p2').style.display=showPers?'':'none';
 }
 function novoPote(){ openModal('➕ Nova Meta', formPote(), ()=>salvarPote()); }
 function editarPote(id){ openModal('✏️ Editar Meta', formPote(getItem(DB.potes,id)), ()=>salvarPote(id)); }
 async function salvarPote(id=null){
-  const obj={id:id||nextId(DB.potes,'POTE'), nome:document.getElementById('f-potenome').value.trim(),
-    icone:document.getElementById('f-poteicone').value.trim()||'🎯', meta_valor:parseFloat(document.getElementById('f-potemeta').value)||0,
-    criado_em:id?getItem(DB.potes,id)?.criado_em:new Date().toISOString()};
+  const existente=id?getItem(DB.potes,id):null;
+  const prazoModo=document.getElementById('f-poteprazomodo').value;
+  const dataInicio=document.getElementById('f-potedatainicio').value || new Date().toISOString().slice(0,10);
+  let prazoData=null, prazoDuracao=null;
+  if(prazoModo==='data'){
+    prazoData=document.getElementById('f-poteprazodata').value||null;
+  } else if(prazoModo==='duracao'){
+    prazoDuracao={
+      anos:parseInt(document.getElementById('f-poteduranos').value)||0,
+      meses:parseInt(document.getElementById('f-potedurmeses').value)||0,
+      semanas:parseInt(document.getElementById('f-potedursemanas').value)||0,
+      dias:parseInt(document.getElementById('f-potedurdias').value)||0,
+    };
+    prazoData=calcularPrazoData(dataInicio, prazoDuracao);
+  }
+  const quem=document.getElementById('f-potequem').value;
+  const forma=document.getElementById('f-poteforma').value;
+  const contribManualStr=document.getElementById('f-potecontribmensal').value;
+  const obj={
+    id:id||nextId(DB.potes,'POTE'),
+    nome:document.getElementById('f-potenome').value.trim(),
+    descricao:document.getElementById('f-potedesc').value.trim(),
+    icone:document.getElementById('f-poteicone').value.trim()||'🎯',
+    tipo_meta:document.getElementById('f-potetipo').value,
+    meta_valor:parseFloat(document.getElementById('f-potemeta').value)||0,
+    data_inicio:dataInicio,
+    prazo_modo:prazoModo,
+    prazo_data:prazoData,
+    prazo_duracao:prazoDuracao,
+    prioridade:document.getElementById('f-poteprioridade').value,
+    quem,
+    forma_contribuicao:quem==='casal'?forma:'5050',
+    contrib_personalizada_p1:forma==='personalizado'?(parseFloat(document.getElementById('f-potepersp1').value)||0):0,
+    contrib_personalizada_p2:forma==='personalizado'?(parseFloat(document.getElementById('f-potepersp2').value)||0):0,
+    contribuicao_mensal_planejada:contribManualStr!==''?(parseFloat(contribManualStr)||0):null,
+    criado_em:existente?existente.criado_em:new Date().toISOString()
+  };
   if(!obj.nome){toast('Informe o nome da meta','error');return;}
-  await salvarItem('potes',obj); toast(id?'Atualizado!':'Meta criada!'); closeModal(); render('metas');
+  if(!obj.meta_valor||obj.meta_valor<=0){toast('Informe um valor de meta válido','error');return;}
+  if(prazoModo==='data' && !prazoData){toast('Informe a data do prazo','error');return;}
+  await salvarItem('potes',obj);
+  if(!existente){
+    const elValorInicial=document.getElementById('f-potevalorinicial');
+    const valorInicial=elValorInicial?(parseFloat(elValorInicial.value)||0):0;
+    if(valorInicial>0){
+      const aporte={id:nextId(DB.aportes,'APT'), pote_id:obj.id, pessoa:'casal', valor:valorInicial, data:dataInicio, status:'confirmado', observacao:'Valor inicial', criado_em:new Date().toISOString()};
+      await salvarItem('aportes',aporte);
+    }
+  }
+  toast(id?'Atualizado!':'Meta criada!'); closeModal(); render('metas');
 }
 function aportarPote(poteId){
   const p=getItem(DB.potes,poteId); if(!p) return;
@@ -1228,14 +1393,60 @@ function aportarPote(poteId){
       </select></div>
       <div class="form-group"><label class="form-label">Valor (R$)</label><input class="form-input" id="f-aportevalor" type="number" step="0.01" value=""></div>
       <div class="form-group"><label class="form-label">Data</label><input class="form-input" id="f-aportedata" type="date" value="${new Date().toISOString().slice(0,10)}"></div>
+      <div class="form-group"><label class="form-label">Status</label><select class="form-select" id="f-aportestatus">
+        <option value="confirmado">✅ Já guardei (confirmado)</option>
+        <option value="planejado">🗓️ Vou guardar (planejado, aparece no calendário)</option>
+      </select></div>
+      <div class="form-group"><label class="form-label">Observação (opcional)</label><input class="form-input" id="f-aporteobs" value=""></div>
     </div>`,
     async()=>{
       const valor=parseFloat(document.getElementById('f-aportevalor').value)||0;
       if(valor<=0){toast('Informe um valor válido','error');return;}
       const obj={id:nextId(DB.aportes,'APT'), pote_id:poteId, pessoa:document.getElementById('f-aportepessoa').value,
-        valor, data:document.getElementById('f-aportedata').value, criado_em:new Date().toISOString()};
-      await salvarItem('aportes',obj); toast('Aporte registrado! 🎉'); closeModal(); render('metas');
+        valor, data:document.getElementById('f-aportedata').value, status:document.getElementById('f-aportestatus').value,
+        observacao:document.getElementById('f-aporteobs').value.trim(), criado_em:new Date().toISOString()};
+      await salvarItem('aportes',obj);
+      toast(obj.status==='planejado'?'Aporte planejado! Vai aparecer no calendário.':'Aporte registrado! 🎉');
+      closeModal(); render('metas');
     }, '💰 Confirmar Aporte');
+}
+function confirmarAporte(aporteId){
+  const a=getItem(DB.aportes,aporteId); if(!a) return;
+  a.status='confirmado';
+  salvarItem('aportes',a).then(()=>{ toast('Aporte confirmado! 🎉'); render(currentSection); });
+}
+function verDetalheMeta(poteId){
+  const p=potesComProgresso().find(x=>x.id===poteId); if(!p) return;
+  const prazoTxt=p.prazo_data?`${p.prazo_data.split('-').reverse().join('/')} · ${p.dias_restantes}d restantes`:'Sem prazo definido';
+  const historico=[...p.aportes].sort((a,b)=>(b.data||'').localeCompare(a.data||''));
+  const planejados=[...p.aportes_planejados].sort((a,b)=>(a.data||'').localeCompare(b.data||''));
+  const formaLabel=p.forma_contribuicao==='proporcional'?'proporcional à renda':p.forma_contribuicao==='personalizado'?'personalizada':'50/50';
+  openModal(`${p.icone||'🎯'} ${p.nome}`,
+    `${p.descricao?`<p style="font-size:12.5px;color:var(--cinza-med);margin-bottom:10px">${p.descricao}</p>`:''}
+    <div class="progress-bar-bg"><div class="progress-bar-fill" style="width:${p.pct}%;background:${p.pct>=100?'var(--dourado-escuro)':'var(--verde-med)'}"></div></div>
+    <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:12px;margin-bottom:14px"><span>${R$(p.valor_atual)} de ${R$(p.meta_valor)}</span><b>${p.pct.toFixed(0)}%</b></div>
+    <div class="kpi-grid" style="margin-bottom:14px">
+      <div class="kpi-card"><div class="kpi-label">Falta</div><div class="kpi-value" style="font-size:15px">${R$(p.valor_restante)}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Prazo</div><div class="kpi-value" style="font-size:12.5px">${prazoTxt}</div></div>
+      ${p.por_dia!=null?`<div class="kpi-card"><div class="kpi-label">Por dia</div><div class="kpi-value" style="font-size:14px">${R$(p.por_dia)}</div></div>`:''}
+      ${p.por_semana!=null?`<div class="kpi-card"><div class="kpi-label">Por semana</div><div class="kpi-value" style="font-size:14px">${R$(p.por_semana)}</div></div>`:''}
+      ${p.por_mes!=null?`<div class="kpi-card"><div class="kpi-label">Por mês</div><div class="kpi-value" style="font-size:14px">${R$(p.por_mes)}</div></div>`:''}
+    </div>
+    ${p.quem==='casal'?`<div class="panel" style="margin:0 0 14px"><div style="padding:12px;font-size:12.5px">
+      <b>Contribuição mensal (${formaLabel})</b>
+      <div style="display:flex;justify-content:space-between;margin-top:6px"><span>${nomePessoa('p1')}</span><b>${R$(p.contrib_calc_p1)}</b></div>
+      <div style="display:flex;justify-content:space-between"><span>${nomePessoa('p2')}</span><b>${R$(p.contrib_calc_p2)}</b></div>
+    </div></div>`:''}
+    ${planejados.length>0?`<div style="margin-bottom:14px"><b style="font-size:12.5px">🗓️ Aportes planejados</b>
+      <div class="tbl-wrap"><table><thead><tr><th>Data</th><th>Quem</th><th>Valor</th><th></th></tr></thead>
+      <tbody>${planejados.map(a=>`<tr><td>${a.data}</td><td>${nomePessoa(a.pessoa)}</td><td>${R$(a.valor)}</td><td><button class="btn btn-success btn-xs" onclick="confirmarAporte('${a.id}')">✅ Confirmar</button></td></tr>`).join('')}</tbody></table></div>
+    </div>`:''}
+    <div><b style="font-size:12.5px">Histórico de aportes</b>
+      <div class="tbl-wrap"><table><thead><tr><th>Data</th><th>Quem</th><th>Valor</th><th>Obs.</th></tr></thead>
+      <tbody>${historico.length===0?'<tr><td colspan="4" style="text-align:center;color:var(--cinza-med)">Nenhum aporte ainda.</td></tr>':historico.map(a=>`<tr><td>${a.data}</td><td>${nomePessoa(a.pessoa)}</td><td class="text-verde fw-bold">${R$(a.valor)}</td><td style="font-size:11px">${a.observacao||'—'}</td></tr>`).join('')}</tbody></table></div>
+    </div>`,
+    ()=>closeModal(),'Fechar');
+  document.getElementById('modal-save-btn').style.display='none';
 }
 
 // ═══════════════════════════════════════════════════════════════
