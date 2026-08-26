@@ -268,7 +268,8 @@ let _googleBotaoRenderizado = false;
 let _sessaoExpirada = false; // true quando a sincronização falhou por token vencido e a renovação silenciosa também não deu certo
 
 let DB = {
-  config:{pessoa1_nome:'Pessoa 1', pessoa2_nome:'Pessoa 2', renda_base_p1:0, renda_base_p2:0, modo_divisao:'proporcional', meta_economia_pct:20},
+  config:{pessoa1_nome:'Pessoa 1', pessoa2_nome:'Pessoa 2', renda_base_p1:0, renda_base_p2:0, modo_divisao:'proporcional', meta_economia_pct:20,
+    origem_renda_p1:'', origem_renda_p2:'', dia_recebimento_p1:0, dia_recebimento_p2:0, frequencia_renda_p1:'mensal', frequencia_renda_p2:'mensal'},
   entradas:[], despesas_fixas:[], despesas:[], potes:[], aportes:[]
 };
 const TABELAS = ['config','entradas','despesas_fixas','despesas','potes','aportes'];
@@ -1323,6 +1324,20 @@ SECTIONS.config=()=>{
       <div class="form-group"><label class="form-label">Nome da Pessoa 2</label><input class="form-input" id="cfg-p2nome" value="${DB.config.pessoa2_nome||''}"></div>
       <div class="form-group"><label class="form-label">Renda Base Mensal — Pessoa 1 (R$)</label><input class="form-input" id="cfg-p1renda" type="number" step="0.01" value="${DB.config.renda_base_p1||''}"></div>
       <div class="form-group"><label class="form-label">Renda Base Mensal — Pessoa 2 (R$)</label><input class="form-input" id="cfg-p2renda" type="number" step="0.01" value="${DB.config.renda_base_p2||''}"></div>
+      <div class="form-group"><label class="form-label">Origem da renda — Pessoa 1</label><input class="form-input" id="cfg-p1origem" value="${DB.config.origem_renda_p1||''}" placeholder="Ex: Salário CLT, Freela..."></div>
+      <div class="form-group"><label class="form-label">Origem da renda — Pessoa 2</label><input class="form-input" id="cfg-p2origem" value="${DB.config.origem_renda_p2||''}" placeholder="Ex: Salário CLT, Freela..."></div>
+      <div class="form-group"><label class="form-label">Dia que recebe — Pessoa 1</label><input class="form-input" id="cfg-p1dia" type="number" min="1" max="31" value="${DB.config.dia_recebimento_p1||''}"></div>
+      <div class="form-group"><label class="form-label">Dia que recebe — Pessoa 2</label><input class="form-input" id="cfg-p2dia" type="number" min="1" max="31" value="${DB.config.dia_recebimento_p2||''}"></div>
+      <div class="form-group"><label class="form-label">Frequência — Pessoa 1</label><select class="form-select" id="cfg-p1freq">
+        <option value="mensal" ${DB.config.frequencia_renda_p1!=='semanal'&&DB.config.frequencia_renda_p1!=='quinzenal'?'selected':''}>Mensal</option>
+        <option value="quinzenal" ${DB.config.frequencia_renda_p1==='quinzenal'?'selected':''}>Quinzenal</option>
+        <option value="semanal" ${DB.config.frequencia_renda_p1==='semanal'?'selected':''}>Semanal</option>
+      </select></div>
+      <div class="form-group"><label class="form-label">Frequência — Pessoa 2</label><select class="form-select" id="cfg-p2freq">
+        <option value="mensal" ${DB.config.frequencia_renda_p2!=='semanal'&&DB.config.frequencia_renda_p2!=='quinzenal'?'selected':''}>Mensal</option>
+        <option value="quinzenal" ${DB.config.frequencia_renda_p2==='quinzenal'?'selected':''}>Quinzenal</option>
+        <option value="semanal" ${DB.config.frequencia_renda_p2==='semanal'?'selected':''}>Semanal</option>
+      </select></div>
       <div class="form-group full"><label class="form-label">Como dividir as despesas do casal?</label>
         <select class="form-select" id="cfg-modo">
           <option value="proporcional" ${DB.config.modo_divisao!=='igual'?'selected':''}>Proporcional à renda (mais indicado quando a renda é diferente)</option>
@@ -1348,6 +1363,12 @@ async function salvarConfigPessoas(){
   DB.config.pessoa2_nome=document.getElementById('cfg-p2nome').value.trim()||'Pessoa 2';
   DB.config.renda_base_p1=parseFloat(document.getElementById('cfg-p1renda').value)||0;
   DB.config.renda_base_p2=parseFloat(document.getElementById('cfg-p2renda').value)||0;
+  DB.config.origem_renda_p1=document.getElementById('cfg-p1origem').value.trim();
+  DB.config.origem_renda_p2=document.getElementById('cfg-p2origem').value.trim();
+  DB.config.dia_recebimento_p1=parseInt(document.getElementById('cfg-p1dia').value)||0;
+  DB.config.dia_recebimento_p2=parseInt(document.getElementById('cfg-p2dia').value)||0;
+  DB.config.frequencia_renda_p1=document.getElementById('cfg-p1freq').value;
+  DB.config.frequencia_renda_p2=document.getElementById('cfg-p2freq').value;
   DB.config.modo_divisao=document.getElementById('cfg-modo').value;
   const obj={...DB.config, id:1};
   DB.config=obj;
