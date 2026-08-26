@@ -941,6 +941,37 @@ function potesComProgresso(){
 // ═══════════════════════════════════════════════════════════════
 // DASHBOARD
 // ═══════════════════════════════════════════════════════════════
+// Gera alertas simples de "o que precisa da sua atenção agora", olhando
+// prazo/ritmo das metas, contas próximas e o saldo de Acertos — a lista
+// mais importante fica no topo do dashboard, antes de qualquer número.
+function gerarAlertasDashboard(potes, saldoAcertos, proximasContas){
+  const alertas=[];
+  const hoje=new Date().toISOString().slice(0,10);
+  const seteDiasAtras=(()=>{const d=new Date();d.setDate(d.getDate()-7);return d.toISOString().slice(0,10);})();
+  potes.forEach(p=>{
+    if(!p.prazo_data || p.valor_restante<=0) return;
+    if(p.dias_restantes<0){
+      alertas.push(`⚠️ A meta "${p.nome}" passou do prazo e ainda falta ${R$(p.valor_restante)}.`);
+    } else if(p.dias_restantes<=20){
+      alertas.push(`⏳ Faltam ${p.dias_restantes} dias para o prazo da meta "${p.nome}".`);
+    }
+    if(p.por_semana>0){
+      const aportadoSemana=p.aportes.filter(a=>a.data>=seteDiasAtras).reduce((s,a)=>s+(+a.valor||0),0);
+      if(aportadoSemana < p.por_semana*0.5){
+        alertas.push(`💰 Você precisa aportar ${R$(p.por_semana)} nesta semana pra manter a meta "${p.nome}" no ritmo.`);
+      }
+    }
+  });
+  proximasContas.slice(0,3).forEach(x=>{
+    const dias=diasEntre(hoje, normalizarData(x.venc));
+    if(dias<=1) alertas.push(`📤 ${dias<0?'Pagamento atrasado':dias===0?'Pagamento hoje':'Pagamento amanhã'}: ${x.descricao} — ${R$(x.valor)}.`);
+  });
+  if(saldoAcertos.liquido_direcao!=='quites'){
+    const quemDeve=saldoAcertos.liquido_direcao==='p1_para_p2'?'p1':'p2', quemRecebe=quemDeve==='p1'?'p2':'p1';
+    alertas.push(`🤝 ${nomePessoa(quemDeve)} deve ${R$(saldoAcertos.liquido_valor)} pra ${nomePessoa(quemRecebe)}.`);
+  }
+  return alertas.slice(0,6);
+}
 SECTIONS.dashboard=()=>{
   gerarDespesasFixasDoMes();
   const mesRef=mesAtualStr();
@@ -949,7 +980,7 @@ SECTIONS.dashboard=()=>{
   const despP1=totalPorTipo(mesRef,'p1'), despP2=totalPorTipo(mesRef,'p2'), despCasal=totalPorTipo(mesRef,'casal');
   const despTotal=despP1+despP2+despCasal;
   const pcts=percentuaisDivisao();
-  const contribEsperadaP1=despCasal*pcts.p1, contribEsperadaP2=despCasal*pcts.p2;
+  const [contribEsperadaP1, contribEsperadaP2]=dividirValorExato(despCasal, [pcts.p1, pcts.p2]);
   const sobraP1=rendaP1-despP1-contribEsperadaP1;
   const sobraP2=rendaP2-despP2-contribEsperadaP2;
   const saldoMes=rendaTotal-despTotal;
@@ -961,13 +992,39 @@ SECTIONS.dashboard=()=>{
     .sort((a,b)=>normalizarData(a.venc).localeCompare(normalizarData(b.venc)));
 
   const potes=potesComProgresso();
+  const totalComprometidoMetas=potes.reduce((s,p)=>s+(p.contribuicao_mensal_efetiva||0),0);
+  const disponivelAposMetas=saldoMes-totalComprometidoMetas;
+  const totalGuardadoMetas=potes.reduce((s,p)=>s+p.valor_atual,0);
+  const totalInvestido=potes.filter(p=>p.tipo_meta==='investimento').reduce((s,p)=>s+p.valor_atual,0);
+  const metasComPrazo=potes.filter(p=>p.prazo_data && p.valor_restante>0).sort((a,b)=>a.dias_restantes-b.dias_restantes);
+  const metasAtrasadas=metasComPrazo.filter(p=>p.dias_restantes<0);
+  const metasProximas=metasComPrazo.filter(p=>p.dias_restantes>=0).slice(0,4);
+
+  const saldoAcertos=calcularSaldoLiquido(DB.divisoes, DB.parcelas, DB.parcelamentos);
+  const alertas=gerarAlertasDashboard(potes, saldoAcertos, proximasContas);
 
   return `
+  ${alertas.length>0?`<div class="panel">
+    <div class="panel-header"><span class="panel-title">🔔 Alertas</span></div>
+    <div style="padding:4px 0">${alertas.map(a=>`<div style="padding:10px 16px;border-top:1px solid var(--cinza-claro);font-size:12.5px">${a}</div>`).join('')}</div>
+  </div>`:''}
+
   <div class="kpi-grid">
     <div class="kpi-card verde"><div class="kpi-label">Renda do Mês</div><div class="kpi-value">${R$(rendaTotal)}</div><div class="kpi-sub">${nomePessoa('p1')}: ${R$(rendaP1)} · ${nomePessoa('p2')}: ${R$(rendaP2)}</div></div>
     <div class="kpi-card vermelho"><div class="kpi-label">Despesas do Mês</div><div class="kpi-value">${R$(despTotal)}</div><div class="kpi-sub">Casal: ${R$(despCasal)}</div></div>
     <div class="kpi-card ${saldoMes>=0?'verde':'vermelho'}"><div class="kpi-label">Saldo do Mês</div><div class="kpi-value" style="color:${saldoMes>=0?'var(--txt-verde)':'var(--txt-vermelho)'}">${R$(saldoMes)}</div><div class="kpi-sub">Taxa de poupança: ${taxaPoupanca.toFixed(0)}%</div></div>
     <div class="kpi-card dourado"><div class="kpi-label">Modo de Divisão</div><div class="kpi-value" style="font-size:14px">${DB.config.modo_divisao==='igual'?'50/50':'Proporcional'}</div><div class="kpi-sub">${nomePessoa('p1')} ${(pcts.p1*100).toFixed(0)}% · ${nomePessoa('p2')} ${(pcts.p2*100).toFixed(0)}%</div></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-header"><span class="panel-title">💵 Dinheiro</span></div>
+    <div class="kpi-grid" style="padding:16px;margin-bottom:0">
+      <div class="kpi-card"><div class="kpi-label">Comprometido c/ Metas</div><div class="kpi-value" style="font-size:16px">${R$(totalComprometidoMetas)}</div><div class="kpi-sub">por mês</div></div>
+      <div class="kpi-card ${disponivelAposMetas>=0?'verde':'vermelho'}"><div class="kpi-label">Disponível</div><div class="kpi-value" style="font-size:16px">${R$(disponivelAposMetas)}</div><div class="kpi-sub">saldo do mês − metas</div></div>
+      <div class="kpi-card"><div class="kpi-label">Guardado em Metas</div><div class="kpi-value" style="font-size:16px">${R$(totalGuardadoMetas)}</div></div>
+      <div class="kpi-card roxo"><div class="kpi-label">Investido</div><div class="kpi-value" style="font-size:16px">${R$(totalInvestido)}</div></div>
+      <div class="kpi-card ${saldoAcertos.liquido_direcao==='quites'?'':'vermelho'}"><div class="kpi-label">Acertos entre vocês</div><div class="kpi-value" style="font-size:14px">${saldoAcertos.liquido_direcao==='quites'?'Quites ✅':R$(saldoAcertos.liquido_valor)}</div></div>
+    </div>
   </div>
 
   <div class="panel">
@@ -992,6 +1049,19 @@ SECTIONS.dashboard=()=>{
       ${(!DB.config.renda_base_p1 && !DB.config.renda_base_p2)?`<p style="font-size:11.5px;color:var(--cinza-med);margin-top:10px">💡 Preencha a renda base de cada um em Configurações pra calcular a divisão proporcional certinha — sem isso, fica 50/50 por padrão.</p>`:''}
     </div>
   </div>
+
+  ${(metasAtrasadas.length>0 || metasProximas.length>0)?`<div class="panel">
+    <div class="panel-header"><span class="panel-title">⏳ Metas a Vencer</span><button class="btn btn-outline btn-sm" onclick="goTo('metas')">Ver todas</button></div>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>Meta</th><th>Falta</th><th>Prazo</th><th>Por mês</th></tr></thead>
+      <tbody>${[...metasAtrasadas,...metasProximas].map(p=>`<tr style="cursor:pointer" onclick="verDetalheMeta('${p.id}')">
+        <td class="fw-bold">${p.icone||'🎯'} ${p.nome}</td>
+        <td class="text-vermelho">${R$(p.valor_restante)}</td>
+        <td>${p.dias_restantes<0?`<span class="badge badge-danger">${Math.abs(p.dias_restantes)}d atrasada</span>`:`<span class="badge badge-warn">${p.dias_restantes}d</span>`}</td>
+        <td>${R$(p.por_mes)}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+  </div>`:''}
 
   ${potes.length>0?`<div class="panel">
     <div class="panel-header"><span class="panel-title">🎯 Metas & Potes</span><button class="btn btn-outline btn-sm" onclick="goTo('metas')">Ver todas</button></div>
