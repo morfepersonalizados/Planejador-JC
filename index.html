@@ -47,6 +47,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .login-btn{width:100%;padding:13px;background:var(--azul);color:white;border:none;border-radius:9px;font-size:15px;font-weight:700;cursor:pointer}
 .login-btn:hover{background:var(--azul-escuro)}
 .login-error{color:var(--vermelho);font-size:12.5px;text-align:center;margin-bottom:8px;min-height:0}
+/* Slideshow de fotos do casal — só aparece DEPOIS do login (ícone do menu
+   lateral), não na tela de login pública. Cada .photo-slide cobre todo o
+   elemento pai (que precisa ser position:relative), e o atraso de
+   animação escalonado cria o efeito de esmaecer de uma foto pra outra. */
+.photo-slideshow{position:relative;overflow:hidden}
+.photo-slide{position:absolute;inset:0;background-size:cover;background-position:center;opacity:0;animation:loginSlideshow 25s infinite}
+.photo-slide:nth-child(1){background-image:url('assets/login/foto1.jpg');animation-delay:0s}
+.photo-slide:nth-child(2){background-image:url('assets/login/foto2.jpg');animation-delay:5s}
+.photo-slide:nth-child(3){background-image:url('assets/login/foto3.jpg');animation-delay:10s}
+.photo-slide:nth-child(4){background-image:url('assets/login/foto4.jpg');animation-delay:15s}
+.photo-slide:nth-child(5){background-image:url('assets/login/foto5.jpg');animation-delay:20s}
+@keyframes loginSlideshow{0%{opacity:0}4%{opacity:1}20%{opacity:1}25%{opacity:0}100%{opacity:0}}
 
 /* SIDEBAR / TOPBAR */
 body.sidebar-hidden #sidebar{transform:translateX(-100%)}
@@ -196,7 +208,13 @@ tbody tr:hover{background:var(--cinza-ultra)}
 <div id="app" style="display:none">
   <nav id="sidebar">
     <div id="sidebar-logo">
-      <div class="icon">💞</div>
+      <div class="icon photo-slideshow">
+        <div class="photo-slide"></div>
+        <div class="photo-slide"></div>
+        <div class="photo-slide"></div>
+        <div class="photo-slide"></div>
+        <div class="photo-slide"></div>
+      </div>
       <div><h1>Nosso Dinheiro</h1><p>Financeiro do casal</p></div>
     </div>
     <div class="nav-group" data-grupo="visao">

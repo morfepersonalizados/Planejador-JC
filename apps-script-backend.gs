@@ -17,6 +17,16 @@ var TABELAS = [
   'divisoes', 'parcelamentos', 'parcelas'
 ];
 
+// Rode esta funcao manualmente (selecione "autorizarPermissoes" no menu
+// suspenso ao lado de Executar) sempre que o app mostrar "Offline" e o
+// erro mencionar "UrlFetchApp" ou "external_request" — isso forca o
+// Google a pedir a autorizacao que a validacao do login com Google
+// precisa (doGet sozinho nao serve pra isso: ele falha antes de chegar
+// nessa parte do codigo, entao nunca aciona o pedido de permissao).
+function autorizarPermissoes() {
+  UrlFetchApp.fetch('https://www.google.com', { muteHttpExceptions: true });
+}
+
 // ============================================================
 // AUTENTICACAO - so login com Google, validado aqui no servidor. Sem
 // senha fixa no codigo (o index.html e publico, entao uma senha ali
